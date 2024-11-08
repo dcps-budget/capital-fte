@@ -1,0 +1,141 @@
+---
+title: "Capital-Funded FTEs"
+format: html
+---
+
+```{r}
+library(tidyverse)
+library(glue)
+library(readxl)
+library(qbr)
+```
+
+```{r}
+user <- Sys.getenv("USERNAME")
+
+path <- glue(
+  "C:/Users",
+  "{user}",
+  "District of Columbia Public Schools",
+  "DCPS Budget - Working Files",
+  .sep = "/"
+)
+
+path_fte <- glue(
+  path,
+  "General",
+  "Capital-Funded FTE Request",
+  .sep = "/"
+)
+```
+
+```{r}
+date_cutoff <- as_date("2026-05-01")
+```
+
+```{r}
+fte_capital <-
+  read_excel(
+    glue("{path_fte}/Capital-Funded FTE Request.xlsx"),
+    col_types = "text"
+  ) %>%
+  janitor::clean_names() %>%
+  mutate(across(position_number, \(x) str_pad(x, width = 8, pad = "0"))) %>%
+  rename(grade_cap = grade, step_cap = step)
+```
+
+```{r}
+fte_pfr <-
+  read_excel(
+    "pfr.xlsx",
+    range = "A6:BM14697",
+    col_types = c(rep("text", 51), "date", rep("text", 13))
+  ) %>%
+  janitor::clean_names() %>%
+  select(
+    position_number,
+    name_pfr = name, grade_pfr = grade, step_pfr = step,
+    date_wgi_pfr = wgi_due_date
+  ) %>%
+  mutate(across(c(date_wgi_pfr), as_date)) %>%
+  mutate(across(c(name_pfr), \(x) str_replace(x, ",", ", ")))
+
+fte_pfr
+```
+
+```{r}
+fte_qb_raw <-
+  query_records(
+    subdomain = "octo",
+    auth = keyring::key_get("qb_budget", "interactive"),
+    from = "bjdx5iujg",
+    select = c(13, 262, 119, 120, 353),
+    where = "{359.EX.'FY26'}"
+  )
+
+fte_qb <-
+  fte_qb_raw %>%
+  set_names(
+    c("position_number", "name_qb", "grade_qb", "step_qb", "date_wgi_qb")
+  ) %>%
+  mutate(
+    across(position_number, \(x) str_pad(as.character(x), width = 8, pad = "0"))
+  ) %>%
+  mutate(date_wgi_qb = as_date(date_wgi_qb)) %>%
+  mutate(across(grade_qb, \(x) str_remove(x, "EG-"))) %>%
+  mutate(across(step_qb, \(x) str_remove(x, "Step ")))
+
+fte_qb
+```
+
+# Check Quickbase against Personnel Funding Report
+
+```{r}
+fte_pfr_qb <-
+  fte_capital %>%
+  select(position_number) %>%
+  left_join(fte_pfr, by = join_by(position_number)) %>%
+  left_join(fte_qb, by = join_by(position_number)) %>%
+  mutate(across(starts_with("step_"), as.numeric)) %>%
+  mutate(diff_step = step_qb - step_pfr) %>%
+  mutate(
+    needs_increase = date_wgi_pfr < date_cutoff,
+    mismatch_step = ((step_pfr != step_qb) | (is.na(step_pfr))) & (!needs_increase | (diff_step != 1)),
+    mismatch_name = name_pfr != name_qb | (is.na(name_pfr) & name_qb != "") | (!is.na(name_pfr) & name_qb == ""),
+    .before = 1
+  ) %>%
+  arrange(date_wgi_pfr)
+
+writexl::write_xlsx(
+  fte_pfr_qb, "Capital FTE Validation PFR-QB.xlsx"
+)
+
+fte_pfr_qb
+```
+
+# Check capital budget submission
+
+```{r}
+# fte_capital_check <-
+#   fte_capital %>%
+#   filter(!is.na(last_name), !is.na(first_name)) %>%
+#   left_join(fte_qb, by = join_by(position_number)) %>%
+#   mutate(name_cap = str_c(last_name, ", ", first_name)) %>%
+#   mutate(date_wgi = as_date(wgi), .before = wgi) %>%
+#   mutate(across(grade_qb, \(x) as.numeric(str_remove(x, "EG-")))) %>%
+#   mutate(across(step_qb, \(x) as.numeric(str_remove(x, "Step ")))) %>%
+#   mutate(
+#     needs_increase = date_wgi < date_cutoff,
+#     mismatch_step = (grade_cap != grade_qb | step_cap != step_qb),
+#     mismatch_name = name_cap != name_qb
+#   ) %>%
+#   select(
+#     needs_increase, mismatch_step, mismatch_name,
+#     position_number, date_wgi,
+#     grade_cap, step_cap, grade_qb, step_qb,
+#     name_cap, name_qb
+#   ) %>%
+#   arrange(date_wgi)
+#
+# writexl::write_xlsx(fte_capital_check, "Capital FTE Validation.xlsx")
+```
